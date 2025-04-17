@@ -1,0 +1,6 @@
+﻿###
+
+POST https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize
+Content-Type: application/x-www-form-urlencoded
+
+response_type=code&client_id=0000&redirect_uri=app://oauth2.dev/callback&state=86ec4647-c114-4cca-b2ac-4fd6bcf6eb0d
