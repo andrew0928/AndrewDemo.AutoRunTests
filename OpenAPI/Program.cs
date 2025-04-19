@@ -4,6 +4,7 @@ using Microsoft.SemanticKernel;
 
 using Microsoft.SemanticKernel.Plugins.OpenApi;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Net.Http.Headers;
 using System.Web;
 
@@ -48,9 +49,12 @@ namespace OpenAPI
         private static async Task RunTest_AndrewShop_Carts(Kernel kernel)
         {
             //
-            //  given info
+            //  given info (context)
             //
-            string access_token = await AndrewShop_OAuth2_Login("andrew", "123456");
+            //string access_token = await AndrewShop_OAuth2_Login("andrew", "123456");
+            //string shop_id = "shop1"; // 這是 demo 的 shop id
+            //string location = "zh-TW"; // 這是 demo 的 location id
+
             string api_spec_uri = "https://andrewshopoauthdemo.azurewebsites.net/swagger/v1/swagger.json";
 
             // chatgpt 生成測試案例
@@ -59,31 +63,57 @@ namespace OpenAPI
                 """
                 ## T19 移除商品（負數 qty）
                 
-                step 0, shop=shop1, user=andrew, location=en‑US
+                API Execute Context:
+                - shop: shop123
+                - user: { user: andrew, password: 123456 }
+                - location: { id: zh-TW, time-zone: UTC+8, currency: TWD }
+
+
+                Test Case:
                 step 1, 建立購物車並加入 productId=2, qty=2
                 - POST /api/carts/create → cartId
                 - POST /api/carts/{cartId}/items body {"productId":2,"qty":2}
+                
                 step 2, 移除 1 件同商品
                 - POST /api/carts/{cartId}/items body {"productId":2,"qty":-1}
+                                
                 step 3, 檢查購物車
                 - GET /api/carts/{cartId}
                 
-                result, 預期
-                lineItems 中 productId=2 的 qty=1
+                test result
+                - 預期結果: lineItems 中 productId=2 的 qty=1
+                - 實際結果
+                - 測試是否通過判定
                 
-                無其他商品；其他會員購物車不變
 
                 --
-                請用下列 json format 輸出 result:
+                請輸出 markdown 的測試報告給我
+                我需要每個步驟的執行狀況說明
+                以及最終執行成果說明
+
+                報告最後請附上 json format result, 格式如下:
                 {
                     "result": true(pass) | false(fail),
                     "comments": "測試通過 or 測試失敗說明",
-
+                    "context":{
+                        "shop": "shop1",
+                        "user": { "access_token": "xxxx", "user": "andrew", "password": "123456" },
+                        "location": { "id": "zh-TW", "time-zone": "UTC+8", "currency": "TWD" }
+                    },
                     "steps": [
-                        { "api": "api-name", parameters: {} }
+                        { "api": "api-name", parameters: {}, result="pass|failure", logs="" }
                     ];
                 }
                 """;
+
+
+            APIExecutionContextPlugin.Init_OAuth2(
+                "0000", 
+                Guid.NewGuid().ToString("N"), 
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize", 
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/token");
+
+            kernel.Plugins.AddFromType<APIExecutionContextPlugin>();
 
             await kernel.ImportPluginFromOpenApiAsync(
                pluginName: "andrew_shop",
@@ -97,18 +127,29 @@ namespace OpenAPI
                    HttpClient = HttpLogger.GetHttpClient(true),
                    AuthCallback = (request, cancel) =>
                    {
+                       var api_context = APIExecutionContextPlugin.GetContext(); 
+
                        // Add the authorization header to the request
-                       request.Headers.Add($"Authorization", $"Bearer {access_token}");
+                       request.Headers.Add($"Authorization", $"Bearer {api_context.UserAccessToken}");
+                       // TODO: set location info in Headers
+                       // TODO: set tenant-id info in Headers
                        return Task.CompletedTask;
                    },
                }
             );
+
+            
 
 
             var settings = new PromptExecutionSettings()
             {
                 FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
             };
+
+            // 擷取 T19, 直接將文字敘述的測試案例交給 AI 自動執行
+            Console.WriteLine(await kernel.InvokePromptAsync<string>(
+                test_case_prompts,
+                new(settings)));
 
             //Console.WriteLine(await kernel.InvokePromptAsync<string>(
             //    """
@@ -158,10 +199,7 @@ namespace OpenAPI
             //    new(settings)));
 
 
-            // 擷取 T19, 直接將文字敘述的測試案例交給 AI 自動執行
-            Console.WriteLine(await kernel.InvokePromptAsync<string>(
-                test_case_prompts,
-                new(settings)));
+
         }
 
         // do oauth2 process in andrewshop demo site
@@ -282,5 +320,142 @@ namespace OpenAPI
                 """,
                 new(settings)));
         }
+    }
+
+
+    public class APIExecutionContextPlugin
+    {
+        public static string ShopID { get; private set; } = "shop8";
+
+        public static string UserAccessToken { get; private set; } = null;
+
+        public static string LocationID { get; private set; } = "zh-TW";
+
+
+
+
+        private static bool _isInitialized = false;
+        private static string _client_id = null;
+        private static string _client_secret = null;
+        private static string _authorize_uri = null;
+        private static string _token_uri = null;
+
+        public static bool Init_OAuth2(string clientId, string clientSecret, string authorizeUri, string tokenUri)
+        {
+            if (_isInitialized)
+            {
+                Console.WriteLine("APIExecutionContextPlugin is already initialized.");
+                return false;
+            }
+
+            _client_id = clientId;
+            _client_secret = clientSecret;
+            _authorize_uri = authorizeUri;
+            _token_uri = tokenUri;
+
+            _isInitialized = true;
+
+            return true;
+        }
+
+
+        [KernelFunction]
+        [Description("Get the context for the API execution. Include current tenant (shop id), current use (access token) and current location (iso location-id).")]
+        public static (string ShopID, string UserAccessToken, string LocationID) GetContext()
+        {
+            return (ShopID, UserAccessToken, LocationID);
+        }
+
+
+
+
+        [KernelFunction]
+        [Description("Set the current tenant (shop id) for the API execution context.")]
+        public static async Task<string> SetShopAsync([Description("provide shop apikey, if pass the validation, the shopid will be set.")]string shopApiKey)
+        {
+            Console.WriteLine($"SetShop APIKEY: {shopApiKey}");
+
+            ShopID = "shop8";
+            return ShopID;
+        }
+
+        [KernelFunction]
+        [Description("Set the current location info to the API execution context.")]
+        public static async Task<string> SetLocation([Description("iso location id format, ex: zh-TW, en-US.")]string locationId)
+        {
+            Console.WriteLine($"SetLocation: {locationId}");
+
+            LocationID = locationId;
+            return LocationID;
+        }
+
+
+
+        [KernelFunction]
+        [Description("Set the AccessToken for the API execution context via OAuth2 user authorize process.")]
+        public static async Task<string> SetUserAccessTokenAsync(
+            [Description("login user name")]string username, 
+            [Description("login user password")]string password)
+        {
+            Console.WriteLine($"Set Access Token (via user login: {username} / {password} )");
+            if (!_isInitialized)
+            {
+                Console.WriteLine("APIExecutionContextPlugin is not initialized.");
+                return null;
+            }
+
+            //string access_token = null;
+
+            //string client_id = "0000";
+            //string client_secret = "86ec4647-c114-4cca-b2ac-4fd6bcf6eb0d";
+            string redirect_uri = "app://oauth2.dev/callback";
+
+            //const string authorize_uri = "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize";
+            //const string token_uri = "https://andrewshopoauthdemo.azurewebsites.net/api/login/token";
+
+            //string name = "andrew";
+            //string password = "123456";
+
+            //bool success = false;
+
+            HttpClient hc = HttpLogger.GetHttpClient(true);
+            HttpResponseMessage response = await hc.PostAsync(
+                _authorize_uri,
+                new StringContent(
+                    $"client_id={_client_id}&redirect_uri={redirect_uri}&state={_client_secret}&name={username}&password={password}",
+                    MediaTypeHeaderValue.Parse("application/x-www-form-urlencoded")));
+
+            if (response.Headers.TryGetValues("Location", out var locations))
+            {
+                var callback = new Uri(locations.First());
+                var nvs = HttpUtility.ParseQueryString(callback.Query);
+
+                string code = nvs["code"];
+                string state = nvs["state"];
+
+                Console.WriteLine($"code:  {nvs["code"]}");
+                Console.WriteLine($"state: {nvs["state"]}");
+
+                response = await hc.PostAsync(
+                    _token_uri,
+                    new StringContent(
+                        $"code={code}",
+                        MediaTypeHeaderValue.Parse("application/x-www-form-urlencoded")
+                    ));
+
+                // response 格式是如下的 json: {"access_token":"a5862036f8fd46b5b0168042108817c2","token_type":"Bearer","expires_in":3600}
+                // 所以要用 System.Text.Json 解析 access_token
+                string json = await response.Content.ReadAsStringAsync();
+                UserAccessToken = System.Text.Json.JsonDocument.Parse(json)
+                    .RootElement
+                    .GetProperty("access_token")
+                    .GetString();
+                //success = true;
+                return UserAccessToken;
+            }
+
+            return null;
+        }
+
     }
 }
