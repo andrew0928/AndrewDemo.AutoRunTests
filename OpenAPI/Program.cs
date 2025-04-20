@@ -91,7 +91,7 @@ namespace OpenAPI
                 我需要每個步驟的執行狀況說明
                 以及最終執行成果說明
 
-                報告最後請附上 json format result, 格式如下:
+                報告請附上 json format result, 格式如下:
                 {
                     "result": true(pass) | false(fail),
                     "comments": "測試通過 or 測試失敗說明",
@@ -104,6 +104,9 @@ namespace OpenAPI
                         { "api": "api-name", parameters: {}, result="pass|failure", logs="" }
                     ];
                 }
+
+                --
+                請輸出能執行這段測試案例的 C# 程式碼給我
                 """;
 
 
