@@ -27,30 +27,30 @@ namespace OpenAPI
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Console.ForegroundColor = ConsoleColor.Blue;
-            Console.WriteLine("Request Body:");
+            Console.Error.WriteLine("Request Body:");
             Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine(request.ToString());
-            Console.WriteLine();
+            Console.Error.WriteLine(request.ToString());
+            Console.Error.WriteLine();
             if (request.Content != null)
             {
                 Console.WriteLine(await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
             }
-            Console.WriteLine();
+            Console.Error.WriteLine();
             Console.ResetColor();
 
 
             HttpResponseMessage response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Response Body:");
+            Console.Error.WriteLine("Response Body:");
             Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine(response.ToString());
-            Console.WriteLine();
+            Console.Error.WriteLine(response.ToString());
+            Console.Error.WriteLine();
             if (response.Content != null)
             {
-                Console.WriteLine(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+                Console.Error.WriteLine(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
             }
-            Console.WriteLine();
+            Console.Error.WriteLine();
             Console.ResetColor();
 
 

@@ -1,7 +1,6 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
 
-
 using Microsoft.SemanticKernel.Plugins.OpenApi;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -13,9 +12,6 @@ namespace OpenAPI
     internal class Program
     {
         private static string OPENAI_APIKEY = null;
-        private static string OPENAI_ORGID = null;
-        private static string KERNEL_MEMORY_APIKEY = null;
-
 
 
         static async Task Main(string[] args)
@@ -25,91 +21,150 @@ namespace OpenAPI
                 .Build();
 
             OPENAI_APIKEY = config["OpenAI:ApiKey"];
-            OPENAI_ORGID = config["OpenAI:OrgId"];
-            KERNEL_MEMORY_APIKEY = config["KernelMemory:ApiKey"];
+
 
             var builder = Kernel.CreateBuilder()
                 .AddOpenAIChatCompletion(
-                    modelId: "gpt-4o-mini",
+                    //modelId: "gpt-4o-mini",
                     //modelId: "gpt-4o",
                     //modelId: "gpt-4.1",
-                    //modelId: "o4-mini",
+                    modelId: "o4-mini",
                     apiKey: OPENAI_APIKEY,
                     httpClient: HttpLogger.GetHttpClient(false));
 
             var kernel = builder.Build();
-            await RunTest_AndrewShop_Carts(kernel);
-            //await RunTest_AndrewKM_SearchAPI(kernel);
 
+            // 指定測試程式的 oauth2 client id / secret / auth & callback uri
+            APIExecutionContextPlugin.Init_OAuth2(
+                "0000",
+                Guid.NewGuid().ToString("N"),
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize",
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/token");
+
+            // 將 APIExecutionContextPlugin 加入到 kernel 中 ( 提供 AI 可用的 tool )
+            kernel.Plugins.AddFromType<APIExecutionContextPlugin>();
+
+            // 將待測的 API ( via swagger ) 轉成 Plugin 加入到 kernel 中 ( 提供 AI 可用的 tool )
+            await kernel.ImportPluginFromOpenApiAsync(
+               pluginName: "andrew_shop",
+               uri: new Uri("https://andrewshopoauthdemo.azurewebsites.net/swagger/v1/swagger.json"),
+               executionParameters: new OpenApiFunctionExecutionParameters()
+               {
+                   EnablePayloadNamespacing = true,
+                   HttpClient = HttpLogger.GetHttpClient(true),
+                   AuthCallback = (request, cancel) =>
+                   {
+                       var api_context = APIExecutionContextPlugin.GetContext();
+                       // Add the authorization header to the request
+                       request.Headers.Add($"Authorization", $"Bearer {api_context.UserAccessToken}");
+                       // TODO: set location info in Headers
+                       // TODO: set tenant-id info in Headers
+                       return Task.CompletedTask;
+                   },
+               }
+            );
+
+            // 只是掃描測試案例的目錄，找到 testcase.md 就丟給 AI 執行測試, 結果會寫到同目錄的 report.md, 如果有已經存在的 report.md 則會被覆蓋
+            foreach (var file in Directory.GetFiles(@"C:\CodeWork\github.com\AndrewDemo.AutoRunTests\OpenAPI\test-cases", "testcase.md", SearchOption.AllDirectories)
+                .Where(x => (new FileInfo(x)).Directory.Name.StartsWith("tc-05")))
+            {
+                Console.WriteLine($"Run test case: {Path.GetDirectoryName(file)} ...");
+                await RunTest_AndrewShop_Carts(kernel, file);
+            }
+
+            //await RunTest_AndrewShop_Carts(kernel, @"C:\CodeWork\github.com\AndrewDemo.AutoRunTests\OpenAPI\test-cases\tc-05\testcase.md");
+            //await RunTest_AndrewKM_SearchAPI(kernel);
         }
 
-        private static async Task RunTest_AndrewShop_Carts(Kernel kernel)
+        private static async Task RunTest_AndrewShop_Carts(Kernel kernel, string testcase_source)
         {
-            //
-            //  given info (context)
-            //
-            string api_spec_uri = "https://andrewshopoauthdemo.azurewebsites.net/swagger/v1/swagger.json";
+            string testcase_report = Path.Combine(Path.GetDirectoryName(testcase_source), "report.md");
 
-            // chatgpt 生成測試案例
-            // https://chatgpt.com/share/68009f63-8088-800d-8f88-768ba2b2e00d
-            string test_case_prompts =
-                // system prompt
+            if (File.Exists(testcase_report))
+            {
+                File.Delete(testcase_report);
+            }
+
+            var settings = new PromptExecutionSettings()
+            {
+                FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+            };
+
+            var test_case = File.ReadAllText(testcase_source);
+
+            //
+            // 直接將文字敘述的測試案例交給 AI 自動執行，並產生測試報告
+            //
+            var report = await kernel.InvokePromptAsync<string>(
                 """
                 <message role="system">
                 依照我給你的 test case 執行測試。
                 測試案例分為四個部分:
-
                 - Context:  此為 API 執行的環境設置, 包含 shop id, user access token, location id 等等。請用 ApiExecutionContextPlugin 來設置這些環境變數。
                 - Given:    執行測試的前置作業。進行測試前請先完成這些步驟。若 Given 的步驟執行失敗，請標記該測試 [無法執行]
-                - When:     測試步驟，請按照敘述執行。若這些步驟無法完成，請標記該測試 [執行失敗], 並且附上失敗的原因說明。
+                - When:     測試步驟，請按照敘述執行，呼叫指定 API 並偵測回傳結果。若這些步驟無法完成，請標記該測試 [執行失敗], 並且附上失敗的原因說明。
                 - Then:     預期結果，請檢查這些步驟的執行結果是否符合預期。若這些步驟無法完成，請標記該測試 [測試不過], 並且附上不符合預期的原因說明。如果測試符合預期結果，請標記該測試 [測試通過]
+
+                所有標示 api 的 request / response 內容, 請勿直接生成, 或是啟用任何 cache 機制替代直接呼叫 api. 我只接受真正呼叫 api 取得的 response.
                 </message>
-                """
-                +
-
-                // user prompt: given, when, then
-                """
                 <message role="user">
-
-                ## Context
-                
-                - shop: shop123
-                - user: { user: andrew, password: 123456 }
-                - location: { id: zh-TW, time-zone: UTC+8, currency: TWD }
-
-
-                ## Given
-
-                - 測試前請清空購物車
-                - 指定商品為 productID: 3
-                
-
-                ## When
-
-                Test name: TC‑05 （非法上界：qty = 11）
-                step 1, 嘗試加入 11 件 (qty=11)
-                step 2, 檢查購物車內容
-                
-
-                ## Then
-
-                - 執行 step 1 時，伺服器應回傳 400 Bad Request（數量超出 10）
-                - step 2 查詢結果，購物車應該是空的
+                以下為要執行的測試案例
+                --
+                {{$test_case}}
 
                 </message>
-                """
-                +
-
-                // report and summary requirement
-                """
                 <message role="user">
-                請輸出 markdown 的測試報告給我，包含下列資訊:
+                    
+                生成 markdown 格式的測試報告，要包含下列資訊:
 
-                1. 我需要每個步驟的執行狀況說明
-                2. 以及最終執行成果說明
-                3. 報告請附上 json format result, 格式如下:
+                # 測試案例名稱 (例如: TC-05, 非法上界)
+
+                ## 測試步驟
+
+                **Context**:
+
+                (列出目前 context 相關設定內容)
+
+                **Given**:
+
+                |步驟名稱 | API | Request | Response | 測試結果 | 測試說明 |
+                |---------|-----|---------|----------|----------|----------|
+                | step 1  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+                | step 2  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+                | step 3  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+
+
+                **When**:
+
+                |步驟名稱 | API | Request | Response | 測試結果 | 測試說明 |
+                |---------|-----|---------|----------|----------|----------|
+                | step 1  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+                | step 2  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+                | step 3  | api-name | {} | {} | pass/fail | 測試執行結果說明 |
+                    
+                **Then**:
+
+                - (預期結果1): 測試結果說明
+                - (預期結果2): 測試結果說明
+                - (預期結果3): 測試結果說明
+                
+
+
+                ## 測試結果
+                
+                **測試結果**: 無法執行(start_fail) | 執行失敗(exec_fail) | 測試不過(test_fail) | 測試通過(test_pass)
+                    
+                (文字敘述)
+                    
+
+                ## 結構化測試報告
+                    
+                (生成 json 格式的測試結果, 格式如下)
+                    
+                ```json
                 {
-                    "result": 無法執行(start_fail) | 執行失敗(exec_fail) | 測試不過(test_fail) | 測試通過(test_pass),
+                    "name": "測試案例名稱, 例如 TC-05(...)",
+                    "result": start_fail|exec_fail|test_fail|test_pass,
                     "comments": "測試執行結果說明",
                     "context":{
                         "shop": "shop1",
@@ -120,58 +175,26 @@ namespace OpenAPI
                         { "api": "api-name", "request": {}, "response": {}, "test-result"="註記該步驟執行結果是否符合預期，pass or failure", "test-comments"="測試結果說明" }
                     ];
                 }
-                4. 輸出能執行這段測試案例的 C# 程式碼, 用 xUnit 框架的結構來產生程式碼
+                ```
+                    
+                ## 測試案例程式碼
+
+                (生成能執行這段測試案例的 C# 程式碼, 用 xUnit 框架的結構來產生程式碼)
+
+                ```csharp
+
+                // your csharp code that can run test case here
+
+                ```
+                
                 </message>
-                """;
+                """,
+                new(settings)
+                {
+                    ["test_case"] = test_case
+                });
 
-
-            APIExecutionContextPlugin.Init_OAuth2(
-                "0000", 
-                Guid.NewGuid().ToString("N"), 
-                "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize", 
-                "https://andrewshopoauthdemo.azurewebsites.net/api/login/token");
-
-
-            kernel.Plugins.AddFromType<APIExecutionContextPlugin>();
-
-            await kernel.ImportPluginFromOpenApiAsync(
-               pluginName: "andrew_shop",
-               uri: new Uri(api_spec_uri),
-               executionParameters: new OpenApiFunctionExecutionParameters()
-               {
-                   // Determines whether payload parameter names are augmented with namespaces.
-                   // Namespaces prevent naming conflicts by adding the parent parameter name
-                   // as a prefix, separated by dots
-                   EnablePayloadNamespacing = true,
-                   HttpClient = HttpLogger.GetHttpClient(true),
-                   AuthCallback = (request, cancel) =>
-                   {
-                       var api_context = APIExecutionContextPlugin.GetContext(); 
-
-                       // Add the authorization header to the request
-                       request.Headers.Add($"Authorization", $"Bearer {api_context.UserAccessToken}");
-                       // TODO: set location info in Headers
-                       // TODO: set tenant-id info in Headers
-                       return Task.CompletedTask;
-                   },
-               }
-            );
-
-            
-
-
-            var settings = new PromptExecutionSettings()
-            {
-                FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
-            };
-
-            //
-            // 直接將文字敘述的測試案例交給 AI 自動執行，並產生測試報告
-            //
-            Console.WriteLine(await kernel.InvokePromptAsync<string>(
-                test_case_prompts,
-                new(settings)));
-
+            File.WriteAllText(testcase_report, report);
 
             //
             //  只自動化執行腳本
@@ -197,8 +220,6 @@ namespace OpenAPI
             //    直接用 json 輸出 api execute context, 以及購物車最終狀態。購物車內容請附加上 [完整的商品名稱]
             //    """,
             //    new(settings)));
-
-
         }
     }
 
@@ -210,9 +231,6 @@ namespace OpenAPI
         public static string UserAccessToken { get; private set; } = null;
 
         public static string LocationID { get; private set; } = "zh-TW";
-
-
-
 
         private static bool _isInitialized = false;
         private static string _client_id = null;
@@ -246,9 +264,6 @@ namespace OpenAPI
             return (ShopID, UserAccessToken, LocationID);
         }
 
-
-
-
         [KernelFunction]
         [Description("Set the current tenant (shop id) for the API execution context.")]
         public static async Task<string> SetShopAsync([Description("provide shop apikey, if pass the validation, the shopid will be set.")]string shopApiKey)
@@ -269,8 +284,6 @@ namespace OpenAPI
             return LocationID;
         }
 
-
-
         [KernelFunction]
         [Description("Set the AccessToken for the API execution context via OAuth2 user authorize process.")]
         public static async Task<string> SetUserAccessTokenAsync(
@@ -284,19 +297,7 @@ namespace OpenAPI
                 return null;
             }
 
-            //string access_token = null;
-
-            //string client_id = "0000";
-            //string client_secret = "86ec4647-c114-4cca-b2ac-4fd6bcf6eb0d";
             string redirect_uri = "app://oauth2.dev/callback";
-
-            //const string authorize_uri = "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize";
-            //const string token_uri = "https://andrewshopoauthdemo.azurewebsites.net/api/login/token";
-
-            //string name = "andrew";
-            //string password = "123456";
-
-            //bool success = false;
 
             HttpClient hc = HttpLogger.GetHttpClient(false);
             HttpResponseMessage response = await hc.PostAsync(
@@ -331,12 +332,10 @@ namespace OpenAPI
                     .GetProperty("access_token")
                     .GetString();
                 Console.WriteLine($"auth:  {UserAccessToken}");
-                //success = true;
                 return UserAccessToken;
             }
 
             return null;
         }
-
     }
 }
