@@ -1,13 +1,19 @@
 ﻿using System.ComponentModel;
+using System.Net.Http.Headers;
 using System.Text;
-using MCPSharp;
+using System.Web;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Plugins.OpenApi;
+using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
+
 
 namespace OpenAPI_MCP
 {
-    internal class Program
+    public class Program
     {
         private static string OPENAI_APIKEY;
 
@@ -19,12 +25,68 @@ namespace OpenAPI_MCP
 
             OPENAI_APIKEY = config["OpenAI:ApiKey"];
 
-            var plugins = await OpenApiKernelPluginFactory.CreateFromOpenApiAsync(
-                "swagger",
-                new Uri("https://andrewshopoauthdemo.azurewebsites.net/swagger/v1/swagger.json"));
 
-            //MCPServer.Register<CustomSynthesisSearchPlugin>();
-            await MCPSharp.MCPServer.StartAsync("DemoServer", "0.1.0");
+            var builder = Kernel.CreateBuilder()
+                .AddOpenAIChatCompletion(
+                    //modelId: "gpt-4o-mini",
+                    //modelId: "gpt-4o",
+                    //modelId: "gpt-4.1",
+                    modelId: "o4-mini",
+                    apiKey: OPENAI_APIKEY,
+                    httpClient: HttpLogger.GetHttpClient(false));
+
+            var kernel = builder.Build();
+
+            // 指定測試程式的 oauth2 client id / secret / auth & callback uri
+            APIExecutionContextPlugin.Init_OAuth2(
+                "0000",
+                Guid.NewGuid().ToString("N"),
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/authorize",
+                "https://andrewshopoauthdemo.azurewebsites.net/api/login/token");
+
+            APIExecutionContextPlugin.SetUserAccessTokenAsync("andrew", "1234").Wait();
+
+            // 將 APIExecutionContextPlugin 加入到 kernel 中 ( 提供 AI 可用的 tool )
+            kernel.Plugins.AddFromType<APIExecutionContextPlugin>();
+
+            // 將待測的 API ( via swagger ) 轉成 Plugin 加入到 kernel 中 ( 提供 AI 可用的 tool )
+#pragma warning disable SKEXP0040 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+            await kernel.ImportPluginFromOpenApiAsync(
+               pluginName: "andrew_shop",
+               uri: new Uri("https://andrewshopoauthdemo.azurewebsites.net/swagger/v1/swagger.json"),
+               executionParameters: new OpenApiFunctionExecutionParameters()
+               {
+                   EnablePayloadNamespacing = true,
+                   HttpClient = HttpLogger.GetHttpClient(false),
+                   AuthCallback = (request, cancel) =>
+                   {
+                       var api_context = APIExecutionContextPlugin.GetContext();
+                       // Add the authorization header to the request
+                       request.Headers.Add($"Authorization", $"Bearer {api_context.UserAccessToken}");
+                       // TODO: set location info in Headers
+                       // TODO: set tenant-id info in Headers
+                       return Task.CompletedTask;
+                   },
+               }
+            );
+#pragma warning restore SKEXP0040 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+
+
+
+            var host_builder = Host.CreateEmptyApplicationBuilder(null);
+
+            host_builder.Services
+                //.AddLogging(logging =>
+                //{
+                //    logging.AddConsole();
+                //    logging.SetMinimumLevel(LogLevel.Trace);
+                //})
+                .AddMcpServer()
+                .WithStdioServerTransport()
+                .WithTools(kernel);
+
+            var mcphost = host_builder.Build();
+            mcphost.Run();
         }
 
 
@@ -34,91 +96,149 @@ namespace OpenAPI_MCP
 
 
 
+    }
 
-        public class CustomSynthesisSearchPlugin
+
+    public static class MCPToolsExtension
+    {
+        public static IMcpServerBuilder WithTools(this IMcpServerBuilder builder, Kernel kernel)
         {
-            public enum SynthesisTypeEnum
+            foreach (var plugin in kernel.Plugins)
             {
-                [Description("內容合成: Abstract, 摘要資訊")]
-                Abstract,
-                [Description("內容合成: Question, 將敘述內容摘要成問答形式 (FAQ), 有利於針對問題(Question)或是答案的精準檢索要求")]
-                Question,
-                [Description("內容合成: Problem Solving, 將敘述內容摘要成問題解決的形式，歸納成問題(Problem),原因(RootCause),解決方案(Resolution),案例(Example)的形式，有利於針對問題(Problem)的檢索，或是針對特定解決方案(Resolution)的檢索要求。")]
-                Problem,
-                [Description("內容合成: None, 沒有經過合成處理，直接檢索原始內容時適用")]
-                None,
-            }
-
-            [McpTool("search", "Search Andrew's blog for the given query. Andrew is Microsoft MVP, good in .NET and AI application development.")]
-            //[KernelFunction("search")]
-            //[Description("Search Andrew's blog for the given query. Andrew is Microsoft MVP, good in .NET and AI application development.")]
-            public async Task<string> AndrewBlogSearchResultAsync(
-                //[Description("The query to search for.")] 
-                [McpParameter(true, "The query to search for.")]
-                string query,
-
-                //[Description("Search from which synthesis source? abstract | question | problem | none")]
-                //[McpParameter(true, "Search from which synthesis source? abstract | question | problem | none")]
-                //SynthesisTypeEnum synthesis = SynthesisTypeEnum.None,
-
-                //[Description("The index to search in.")]
-                [McpParameter(true, "The index to search in.")]
-                int limit = 3)
-            {
-                var synthesis = SynthesisTypeEnum.None;
-
-                var km = new MemoryWebClient("http://127.0.0.1:9001/", KERNEL_MEMORY_APIKEY);
-                var result = await km.SearchAsync(
-                    query,
-                    index: "blog",
-                    //filter: (new MemoryFilter()).ByTag("synthesis", synthesis.ToString().ToLower()),
-                    limit: limit);
-
-                StringBuilder sb = new StringBuilder();
-                foreach (var item in result.Results)
+                foreach (var function in plugin)
                 {
-                    foreach (var p in item.Partitions)
-                    {
-                        sb.AppendLine("".PadRight(80, '='));
-                        sb.AppendLine($"## Fact:");
-                        sb.AppendLine();
-                        sb.AppendLine($" - Relevance: {p.Relevance}%");
-                        sb.AppendLine($" - Title:     {p.Tags["post-title"][0]}");
-                        sb.AppendLine($" - URL:       {p.Tags["post-url"][0]}");
+#pragma warning disable SKEXP0001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+                    builder.Services.AddSingleton(services => McpServerTool.Create(function.AsAIFunction()));
 
-                        switch (synthesis)
-                        {
-                            case SynthesisTypeEnum.Abstract:
-                                sb.AppendLine($" - Format:    Abstract");
-                                break;
-                            case SynthesisTypeEnum.Question:
-                                sb.AppendLine($" - Format:    FAQ");
-                                break;
-                            case SynthesisTypeEnum.Problem:
-                                sb.AppendLine($" - Format:    Problem Solving");
-                                break;
-                            case SynthesisTypeEnum.None:
-                            default:
-                                sb.AppendLine($" - Format:    Original Content");
-                                break;
-                        }
-
-                        sb.AppendLine();
-                        sb.AppendLine($"```");
-                        sb.AppendLine(p.Text);
-                        sb.AppendLine($"```");
-                        sb.AppendLine();
-                    }
+                    //if (function.Name == "GetCart")
+                    //{
+                    //    var args = new KernelArguments();
+                    //    args.Add("id", 40);
+                    //    var result = function.InvokeAsync(kernel, args).Result;
+                    //}
+#pragma warning restore SKEXP0001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
                 }
-
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"Kernel Memory Search Results:");
-                Console.ForegroundColor = ConsoleColor.DarkGray;
-                Console.WriteLine(sb.ToString());
-                Console.ResetColor();
-
-                return sb.ToString();
             }
+
+            return builder;
         }
     }
+
+
+
+    public class APIExecutionContextPlugin
+    {
+        public static string ShopID { get; private set; } = "shop8";
+
+        public static string UserAccessToken { get; private set; } = null;
+
+        public static string LocationID { get; private set; } = "zh-TW";
+
+        private static bool _isInitialized = false;
+        private static string _client_id = null;
+        private static string _client_secret = null;
+        private static string _authorize_uri = null;
+        private static string _token_uri = null;
+
+        public static bool Init_OAuth2(string clientId, string clientSecret, string authorizeUri, string tokenUri)
+        {
+            if (_isInitialized)
+            {
+                Console.WriteLine("APIExecutionContextPlugin is already initialized.");
+                return false;
+            }
+
+            _client_id = clientId;
+            _client_secret = clientSecret;
+            _authorize_uri = authorizeUri;
+            _token_uri = tokenUri;
+
+            _isInitialized = true;
+
+            return true;
+        }
+
+
+        [KernelFunction]
+        [Description("Get the context for the API execution. Include current tenant (shop id), current use (access token) and current location (iso location-id).")]
+        public static (string ShopID, string UserAccessToken, string LocationID) GetContext()
+        {
+            return (ShopID, UserAccessToken, LocationID);
+        }
+
+        [KernelFunction]
+        [Description("Set the current tenant (shop id) for the API execution context.")]
+        public static async Task<string> SetShopAsync([Description("provide shop apikey, if pass the validation, the shopid will be set.")] string shopApiKey)
+        {
+            Console.WriteLine($"SetShop APIKEY: {shopApiKey}");
+
+            ShopID = "shop8";
+            return ShopID;
+        }
+
+        [KernelFunction]
+        [Description("Set the current location info to the API execution context.")]
+        public static async Task<string> SetLocation([Description("iso location id format, ex: zh-TW, en-US.")] string locationId)
+        {
+            Console.WriteLine($"SetLocation: {locationId}");
+
+            LocationID = locationId;
+            return LocationID;
+        }
+
+        [KernelFunction]
+        [Description("Set the AccessToken for the API execution context via OAuth2 user authorize process.")]
+        public static async Task<string> SetUserAccessTokenAsync(
+            [Description("login user name")] string username,
+            [Description("login user password")] string password)
+        {
+            //Console.Error.WriteLine($"Set Access Token (via user login: {username} / {password} )");
+            if (!_isInitialized)
+            {
+                //Console.Error.WriteLine("APIExecutionContextPlugin is not initialized.");
+                return null;
+            }
+
+            string redirect_uri = "app://oauth2.dev/callback";
+
+            HttpClient hc = HttpLogger.GetHttpClient(false);
+            HttpResponseMessage response = await hc.PostAsync(
+                _authorize_uri,
+                new StringContent(
+                    $"client_id={_client_id}&redirect_uri={redirect_uri}&state={_client_secret}&name={username}&password={password}",
+                    MediaTypeHeaderValue.Parse("application/x-www-form-urlencoded")));
+
+            if (response.Headers.TryGetValues("Location", out var locations))
+            {
+                var callback = new Uri(locations.First());
+                var nvs = HttpUtility.ParseQueryString(callback.Query);
+
+                string code = nvs["code"];
+                string state = nvs["state"];
+
+                //Console.Error.WriteLine($"code:  {nvs["code"]}");
+                //Console.Error.WriteLine($"state: {nvs["state"]}");
+
+                response = await hc.PostAsync(
+                    _token_uri,
+                    new StringContent(
+                        $"code={code}",
+                        MediaTypeHeaderValue.Parse("application/x-www-form-urlencoded")
+                    ));
+
+                // response 格式是如下的 json: {"access_token":"a5862036f8fd46b5b0168042108817c2","token_type":"Bearer","expires_in":3600}
+                // 所以要用 System.Text.Json 解析 access_token
+                string json = await response.Content.ReadAsStringAsync();
+                UserAccessToken = System.Text.Json.JsonDocument.Parse(json)
+                    .RootElement
+                    .GetProperty("access_token")
+                    .GetString();
+                //Console.Error.WriteLine($"auth:  {UserAccessToken}");
+                return UserAccessToken;
+            }
+
+            return null;
+        }
+    }
+
 }

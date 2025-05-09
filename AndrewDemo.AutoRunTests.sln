@@ -5,6 +5,8 @@ VisualStudioVersion = 17.13.35913.81
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenAPI", "OpenAPI\OpenAPI.csproj", "{A097AC09-CC74-4B6D-B13E-42A329D60A69}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenAPI_MCP", "OpenAPI_MCP\OpenAPI_MCP.csproj", "{18311A95-74DE-4333-AD39-97110B2649BD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{A097AC09-CC74-4B6D-B13E-42A329D60A69}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A097AC09-CC74-4B6D-B13E-42A329D60A69}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A097AC09-CC74-4B6D-B13E-42A329D60A69}.Release|Any CPU.Build.0 = Release|Any CPU
+		{18311A95-74DE-4333-AD39-97110B2649BD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{18311A95-74DE-4333-AD39-97110B2649BD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{18311A95-74DE-4333-AD39-97110B2649BD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{18311A95-74DE-4333-AD39-97110B2649BD}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
